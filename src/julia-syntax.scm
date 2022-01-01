@@ -260,6 +260,12 @@
   (or (overlay? e)
       (sym-ref? e)))
 
+(define (binding-to-globalref e)
+  (and (nodot-sym-ref? e)
+       (let ((mod (if (globalref? e) (cadr e) '(thismodule)))
+             (sym (if (symbol? e) e (last e))))
+         `(globalref ,mod ,sym))))
+
 ;; convert final (... x) to (curly Vararg x)
 (define (dots->vararg a)
   (if (null? a) a
@@ -2417,16 +2423,11 @@
           (let ((x (cadr lhs))
                 (T (caddr lhs))
                 (rhs (caddr e)))
-            (let* ((e (remove-argument-side-effects x))
-                   (temp (if (or (atom? T) (ssavalue? T) (quoted? T))
-                             #f
-                             (make-ssavalue)))
-                   (ty   (or temp T)))
+            (let ((e (remove-argument-side-effects x)))
               (expand-forms
                `(block ,@(cdr e)
-                       ,@(if temp `((= ,temp ,T)) '())
-                       (decl ,(car e) ,ty)
-                       (= ,(car e) (call (top convert) ,ty ,rhs)))))))
+                       (decl ,(car e) ,T)
+                       (= ,(car e) ,rhs))))))
          ((vcat ncat)
           ;; (= (vcat . args) rhs)
           (error "use \"(a, b) = ...\" to assign multiple values"))
@@ -3372,7 +3373,7 @@ f(x) = yt(x)
                        (make-ssavalue)))
              (ty   (or temp t))
              (ex   `(call (core typeassert)
-                          ,rhs ;(call (top convert) ,ty ,rhs)
+                          (call (top convert) ,ty ,rhs)
                           ,ty)))
         (if temp
             `(block (= ,temp ,(renumber-assigned-ssavalues t)) ,ex)
@@ -3388,7 +3389,7 @@ f(x) = yt(x)
 ;; declared types.
 ;; when doing this, the original value needs to be preserved, to
 ;; ensure the expression `a=b` always returns exactly `b`.
-(define (convert-assignment var rhs0 fname lam interp opaq)
+(define (convert-assignment var rhs0 fname lam interp opaq globals)
   (cond
     ((symbol? var)
      (let* ((vi (assq var (car  (lam:vinfo lam))))
@@ -3399,14 +3400,14 @@ f(x) = yt(x)
             (closed (and cv (vinfo:asgn cv) (vinfo:capt cv)))
             (capt   (and vi (vinfo:asgn vi) (vinfo:capt vi))))
        (if (and (not closed) (not capt) (equal? vt '(core Any)))
-           `(= ,var ,rhs0)
+           `(= ,var ,(convert-for-type-decl rhs0 (get globals (binding-to-globalref var) '(core Any))))
            (let* ((rhs1 (if (or (simple-atom? rhs0)
                                 (equal? rhs0 '(the_exception)))
                             rhs0
                             (make-ssavalue)))
                   (rhs  (if (equal? vt '(core Any))
                             rhs1
-                            (convert-for-type-decl rhs1 (cl-convert vt fname lam #f #f #f interp opaq))))
+                            (convert-for-type-decl rhs1 (cl-convert vt fname lam #f #f #f interp opaq globals))))
                   (ex (cond (closed `(call (core setfield!)
                                            ,(if interp
                                                 `($ ,var)
@@ -3422,8 +3423,7 @@ f(x) = yt(x)
                          ,rhs1))))))
      ((and (pair? var) (or (eq? (car var) 'outerref)
                            (eq? (car var) 'globalref)))
-
-      `(= ,var ,rhs0))
+      `(= ,var ,(convert-for-type-decl rhs0 (get globals (binding-to-globalref var) '(core Any)))))
      ((ssavalue? var)
       `(= ,var ,rhs0))
      (else
@@ -3683,17 +3683,17 @@ f(x) = yt(x)
 (define (toplevel-preserving? e)
   (and (pair? e) (memq (car e) '(if elseif block trycatch tryfinally trycatchelse))))
 
-(define (map-cl-convert exprs fname lam namemap defined toplevel interp opaq)
+(define (map-cl-convert exprs fname lam namemap defined toplevel interp opaq (globals (table)))
   (if toplevel
       (map (lambda (x)
              (let ((tl (lift-toplevel (cl-convert x fname lam namemap defined
                                                   (and toplevel (toplevel-preserving? x))
-                                                  interp opaq))))
+                                                  interp opaq globals))))
                (if (null? (cdr tl))
                    (car tl)
                    `(block ,@(cdr tl) ,(car tl)))))
            exprs)
-      (map (lambda (x) (cl-convert x fname lam namemap defined #f interp opaq)) exprs)))
+      (map (lambda (x) (cl-convert x fname lam namemap defined #f interp opaq globals)) exprs)))
 
 (define (prepare-lambda! lam)
   ;; mark all non-arguments as assigned, since locals that are never assigned
@@ -3702,11 +3702,11 @@ f(x) = yt(x)
             (list-tail (car (lam:vinfo lam)) (length (lam:args lam))))
   (lambda-optimize-vars! lam))
 
-(define (cl-convert e fname lam namemap defined toplevel interp opaq)
+(define (cl-convert e fname lam namemap defined toplevel interp opaq (globals (table)))
   (if (and (not lam)
            (not (and (pair? e) (memq (car e) '(lambda method macro opaque_closure)))))
       (if (atom? e) e
-          (cons (car e) (map-cl-convert (cdr e) fname lam namemap defined toplevel interp opaq)))
+          (cons (car e) (map-cl-convert (cdr e) fname lam namemap defined toplevel interp opaq globals)))
       (cond
        ((symbol? e)
         (define (new-undef-var name)
@@ -3725,7 +3725,7 @@ f(x) = yt(x)
                  (val (if (equal? typ '(core Any))
                           val
                           `(call (core typeassert) ,val
-                                 ,(cl-convert typ fname lam namemap defined toplevel interp opaq)))))
+                                 ,(cl-convert typ fname lam namemap defined toplevel interp opaq globals)))))
             `(block
                ,@(if (eq? box access) '() `((= ,access ,box)))
                ,undefcheck
@@ -3757,8 +3757,8 @@ f(x) = yt(x)
            e)
           ((=)
            (let ((var (cadr e))
-                 (rhs (cl-convert (caddr e) fname lam namemap defined toplevel interp opaq)))
-             (convert-assignment var rhs fname lam interp opaq)))
+                 (rhs (cl-convert (caddr e) fname lam namemap defined toplevel interp opaq globals)))
+             (convert-assignment var rhs fname lam interp opaq globals)))
           ((local-def) ;; make new Box for local declaration of defined variable
            (let ((vi (assq (cadr e) (car (lam:vinfo lam)))))
              (if (and vi (vinfo:asgn vi) (vinfo:capt vi))
@@ -3824,7 +3824,7 @@ f(x) = yt(x)
                   (sp-inits (if (or short (not (eq? (car sig) 'block)))
                                 '()
                                 (map-cl-convert (butlast (cdr sig))
-                                                fname lam namemap defined toplevel interp opaq)))
+                                                fname lam namemap defined toplevel interp opaq globals)))
                   (sig      (and sig (if (eq? (car sig) 'block)
                                          (last sig)
                                          sig))))
@@ -3851,7 +3851,7 @@ f(x) = yt(x)
                                           ;; anonymous functions with keyword args generate global
                                           ;; functions that refer to the type of a local function
                                           (rename-sig-types sig namemap)
-                                          fname lam namemap defined toplevel interp opaq)
+                                          fname lam namemap defined toplevel interp opaq globals)
                                   ,(let ((body (add-box-inits-to-body
                                                 lam2
                                                 (cl-convert (cadddr lam2) 'anon lam2 (table) (table) #f interp opaq))))
@@ -3865,7 +3865,7 @@ f(x) = yt(x)
                                (newlam    (compact-and-renumber (linearize (car exprs)) 'none 0)))
                           `(toplevel-butfirst
                             (block ,@sp-inits
-                                   (method ,name ,(cl-convert sig fname lam namemap defined toplevel interp opaq)
+                                   (method ,name ,(cl-convert sig fname lam namemap defined toplevel interp opaq globals)
                                            ,(julia-bq-macro newlam)))
                             ,@top-stmts))))
 
@@ -3968,7 +3968,7 @@ f(x) = yt(x)
                                (append (map (lambda (gs tvar)
                                               (make-assignment gs `(call (core TypeVar) ',tvar (core Any))))
                                             closure-param-syms closure-param-names)
-                                       `((method #f ,(cl-convert arg-defs fname lam namemap defined toplevel interp opaq)
+                                       `((method #f ,(cl-convert arg-defs fname lam namemap defined toplevel interp opaq globals)
                                                  ,(convert-lambda lam2
                                                                   (if iskw
                                                                       (caddr (lam:args lam2))
@@ -4007,7 +4007,7 @@ f(x) = yt(x)
                        (begin
                          (put! defined name #t)
                          `(toplevel-butfirst
-                           ,(convert-assignment name mk-closure fname lam interp opaq)
+                           ,(convert-assignment name mk-closure fname lam interp opaq globals)
                            ,@typedef
                            ,@(map (lambda (v) `(moved-local ,v)) moved-vars)
                            ,@sp-inits
@@ -4020,14 +4020,14 @@ f(x) = yt(x)
                                        (table)
                                        (table)
                                        (null? (cadr e)) ;; only toplevel thunks have 0 args
-                                       interp opaq)))
+                                       interp opaq globals)))
              `(lambda ,(cadr e)
                 (,(clear-capture-bits (car (lam:vinfo e)))
                  () ,@(cddr (lam:vinfo e)))
                 (block ,@body))))
           ;; remaining `::` expressions are type assertions
           ((|::|)
-           (cl-convert `(call (core typeassert) ,@(cdr e)) fname lam namemap defined toplevel interp opaq))
+           (cl-convert `(call (core typeassert) ,@(cdr e)) fname lam namemap defined toplevel interp opaq globals))
           ;; remaining `decl` expressions are only type assertions if the
           ;; argument is global or a non-symbol.
           ((decl)
@@ -4036,19 +4036,22 @@ f(x) = yt(x)
                   '(null))
                  (else
                   (cl-convert
-                    (let ((ref (cadr e)))
-                      (if (nodot-sym-ref? ref)
-                          (let ((mod (if (globalref? ref) (cadr ref) '(thismodule)))
-                                (sym (if (symbol? ref) ref (last ref))))
-                            `(call (core _set_typeof!) ,mod (inert ,sym) ,(caddr e)))
+                    (let ((ref (binding-to-globalref (cadr e))))
+                      (if ref
+                          (let ((prev-ty (get globals ref #f)))
+                            (and prev-ty (not (equal? prev-ty (caddr e)))
+                                 (error (string "conflicting type annotations for global `"
+                                                (deparse (cadr e)) "`.")))
+                            (put! globals ref (caddr e))
+                            `(call (core _set_typeof!) ,(cadr ref) (inert ,(caddr ref)) ,(caddr e)))
                           `(call (core typeassert) ,@(cdr e))))
-                    fname lam namemap defined toplevel interp opaq))))
+                    fname lam namemap defined toplevel interp opaq globals))))
           ;; `with-static-parameters` expressions can be removed now; used only by analyze-vars
           ((with-static-parameters)
-           (cl-convert (cadr e) fname lam namemap defined toplevel interp opaq))
+           (cl-convert (cadr e) fname lam namemap defined toplevel interp opaq globals))
           (else
            (cons (car e)
-                 (map-cl-convert (cdr e) fname lam namemap defined toplevel interp opaq))))))))
+                 (map-cl-convert (cdr e) fname lam namemap defined toplevel interp opaq globals))))))))
 
 (define (closure-convert e) (cl-convert e #f #f #f #f #f #f #f))
 

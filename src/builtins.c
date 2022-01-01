@@ -1663,7 +1663,7 @@ JL_CALLABLE(jl_f__set_typeof)
     jl_value_t *ty = args[2];
     JL_TYPECHK(_set_typeof!, type, ty);
     jl_binding_t *b = jl_get_binding_wr((jl_module_t*)args[0], (jl_sym_t*)args[1], 1);
-    if (b->constp && ty != jl_any_type) {
+    if (b->constp && ty != (jl_value_t*)jl_any_type) {
         jl_errorf("cannot set type for constant %s", jl_symbol_name(b->name));
     }
     if (b->ty && ty != b->ty) {
@@ -1675,7 +1675,7 @@ JL_CALLABLE(jl_f__set_typeof)
             jl_errorf("invalid redefinition of type of %s", jl_symbol_name(b->name));
         }
     }
-    if (ty != jl_any_type) {
+    if (ty != (jl_value_t*)jl_any_type) {
         b->ty = ty;
     }
     return jl_nothing;
