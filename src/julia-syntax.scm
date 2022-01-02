@@ -3399,31 +3399,40 @@ f(x) = yt(x)
                      '(core Any)))
             (closed (and cv (vinfo:asgn cv) (vinfo:capt cv)))
             (capt   (and vi (vinfo:asgn vi) (vinfo:capt vi))))
-       (if (and (not closed) (not capt) (equal? vt '(core Any)))
-           `(= ,var ,(convert-for-type-decl rhs0 (get globals (binding-to-globalref var) '(core Any))))
-           (let* ((rhs1 (if (or (simple-atom? rhs0)
-                                (equal? rhs0 '(the_exception)))
-                            rhs0
-                            (make-ssavalue)))
-                  (rhs  (if (equal? vt '(core Any))
-                            rhs1
-                            (convert-for-type-decl rhs1 (cl-convert vt fname lam #f #f #f interp opaq globals))))
-                  (ex (cond (closed `(call (core setfield!)
-                                           ,(if interp
-                                                `($ ,var)
-                                                (capt-var-access var fname opaq))
-                                           (inert contents)
-                                           ,rhs))
-                            (capt `(call (core setfield!) ,var (inert contents) ,rhs))
-                            (else `(= ,var ,rhs)))))
-             (if (eq? rhs1 rhs0)
-                 `(block ,ex ,rhs0)
-                 `(block (= ,rhs1 ,rhs0)
-                         ,ex
-                         ,rhs1))))))
+       (let* ((rhs1 (if (or (simple-atom? rhs0)
+                            (equal? rhs0 '(the_exception)))
+                        rhs0
+                        (make-ssavalue)))
+              (rhs  (if (equal? vt '(core Any))
+                        (if (and (not closed) (not capt))
+                            (convert-for-type-decl rhs1 (get globals (binding-to-globalref var) '(core Any)))
+                            rhs1)
+                        (convert-for-type-decl rhs1 (cl-convert vt fname lam #f #f #f interp opaq globals))))
+              (ex (cond (closed `(call (core setfield!)
+                                       ,(if interp
+                                            `($ ,var)
+                                            (capt-var-access var fname opaq))
+                                       (inert contents)
+                                       ,rhs))
+                        (capt `(call (core setfield!) ,var (inert contents) ,rhs))
+                        (else `(= ,var ,rhs)))))
+        (if (eq? rhs1 rhs0)
+            `(block ,ex (unnecessary ,rhs0))
+            `(block (= ,rhs1 ,rhs0)
+                    ,ex
+                    (unnecessary ,rhs1))))))
      ((and (pair? var) (or (eq? (car var) 'outerref)
                            (eq? (car var) 'globalref)))
-      `(= ,var ,(convert-for-type-decl rhs0 (get globals (binding-to-globalref var) '(core Any)))))
+      (let* ((rhs1 (if (or (simple-atom? rhs0)
+                           (equal? rhs0 '(the_exception)))
+                       rhs0
+                       (make-ssavalue)))
+             (ex   `(= ,var ,(convert-for-type-decl rhs1 (get globals (binding-to-globalref var) '(core Any))))))
+        (if (eq? rhs1 rhs0)
+            `(block ,ex (unnecessary ,rhs0))
+            `(block (= ,rhs1 ,rhs0)
+                    ,ex
+                    (unnecessary ,rhs1)))))
      ((ssavalue? var)
       `(= ,var ,rhs0))
      (else
@@ -4038,10 +4047,10 @@ f(x) = yt(x)
                   (cl-convert
                     (let ((ref (binding-to-globalref (cadr e))))
                       (if ref
-                          (let ((prev-ty (get globals ref #f)))
-                            (and prev-ty (not (equal? prev-ty (caddr e)))
-                                 (error (string "conflicting type annotations for global `"
-                                                (deparse (cadr e)) "`.")))
+                          (begin
+                            (if (get globals ref #f)
+                                (error (string "multiple type annotations for global \""
+                                               (deparse (cadr e)) "\".")))
                             (put! globals ref (caddr e))
                             `(call (core _set_typeof!) ,(cadr ref) (inert ,(caddr ref)) ,(caddr e)))
                           `(call (core typeassert) ,@(cdr e))))

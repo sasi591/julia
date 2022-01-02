@@ -3113,7 +3113,7 @@ end
         end
         g() = x
     end
-    @test m.f() === 2
+    @test m.f() === 2.
     @test m.x === 2
     @test Base.return_types(m.g, ()) == [Int]
 
