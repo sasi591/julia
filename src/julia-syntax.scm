@@ -4052,7 +4052,8 @@ f(x) = yt(x)
                                 (error (string "multiple type annotations for global \""
                                                (deparse (cadr e)) "\".")))
                             (put! globals ref (caddr e))
-                            `(call (core _set_typeof!) ,(cadr ref) (inert ,(caddr ref)) ,(caddr e)))
+                            `(toplevel-butfirst (null) (call (core _set_typeof!) ,(cadr ref)
+                                                      (inert ,(caddr ref)) ,(caddr e))))
                           `(call (core typeassert) ,@(cdr e))))
                     fname lam namemap defined toplevel interp opaq globals))))
           ;; `with-static-parameters` expressions can be removed now; used only by analyze-vars
